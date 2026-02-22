@@ -4,8 +4,12 @@ import streamlit as st
 import os
 
 # ── Load API key from .env ──────────────────────────────────────────
+# Works locally (loads from .env) AND in production (loads from Render environment variables)
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("GEMINI_API_KEY not found. Please set it in .env or environment variables.")
+genai.configure(api_key=api_key)
 
 # ── Model setup ─────────────────────────────────────────────────────
 model = genai.GenerativeModel(
