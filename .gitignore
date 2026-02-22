@@ -1,4 +1,30 @@
+# Virtual Environment
 venv/
+env/
 .env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# VS Code
+.vscode/
+
+# Data files - never push personal financial data to GitHub!
+data/
+*.pdf
+*.csv
+*.xlsx
+
+# Vector database files (will be created in Stage 1)
+chroma_db/
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
