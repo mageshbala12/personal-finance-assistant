@@ -3,7 +3,7 @@ from document_loader import load_document, preprocess_document
 import os
 
 # ── Step 1: Create the text splitter ─────────────────────────────────
-def create_chunks(documents, chunk_size=300, chunk_overlap=50):
+def create_chunks(documents, chunk_size=800, chunk_overlap=100):
     """
     Split documents into smaller chunks for RAG pipeline.
 
