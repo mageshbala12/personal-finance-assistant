@@ -22,6 +22,7 @@ data/
 *.xlsx
 
 # Vector database files (will be created in Stage 1)
+faiss_db/
 chroma_db/
 *.sqlite3
 
