@@ -1,0 +1,7 @@
+[server]
+headless = true
+port = 10000
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
