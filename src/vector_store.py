@@ -54,8 +54,8 @@ def create_vector_store(chunks, embedding_model):
     vector_store = Chroma.from_documents(
         documents=chunks,
         embedding=embedding_model,
-        persist_directory=CHROMA_DB_PATH,
         collection_name=COLLECTION_NAME
+        # No persist_directory = in-memory mode
     )
 
     print(f"✅ Vector store created!")
@@ -86,9 +86,9 @@ def load_vector_store(embedding_model):
         )
 
     vector_store = Chroma(
-        persist_directory=CHROMA_DB_PATH,
         embedding_function=embedding_model,
         collection_name=COLLECTION_NAME
+        # No persist_directory = in-memory mode
     )
 
     print(f"✅ Vector store loaded from {CHROMA_DB_PATH}/")
