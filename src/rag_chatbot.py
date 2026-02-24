@@ -80,6 +80,12 @@ I can help you with:
 - 💬 **General finance questions** — EPF, SIP, NPS, tax planning and more
 - 📄 **Your personal finances** — Upload your bank statement to ask about your spending, investments and balance
 
+**Supported file formats:**
+- 📄 PDF — Bank statements, fund factsheets
+- 📊 CSV — Zerodha tradebook, Groww statement
+- 📗 Excel — HDFC, ICICI, SBI bank exports
+- 📝 TXT — Any text based statement
+
 Feel free to ask any finance question — no document upload required!""",
                 "sources" : [],
                 "chunks"  : [],
@@ -99,8 +105,8 @@ Feel free to ask any finance question — no document upload required!""",
     if "document_indexed" not in st.session_state:
         st.session_state.document_indexed = False
 
-    if "indexed_filename" not in st.session_state:
-        st.session_state.indexed_filename = None
+    if "indexed_filenames" not in st.session_state:
+        st.session_state.indexed_filenames = []
 
     if "show_chunks" not in st.session_state:
         st.session_state.show_chunks = False
@@ -261,37 +267,70 @@ def render_sidebar():
 
         # ── Document upload — OPTIONAL ────────────────────────────────
         st.subheader("📄 Upload Document (Optional)")
-        st.caption("Upload your bank statement for personal finance queries")
+        st.caption("Supports PDF, TXT, CSV, Excel — Zerodha, Groww, HDFC and more!")
 
-        uploaded_file = st.file_uploader(
-            label="Choose a file",
-            type=["pdf", "txt"],
-            help="Optional — upload to ask about your personal finances"
+        uploaded_files = st.file_uploader(
+            label="Choose files",
+            type=["pdf", "txt", "csv", "xlsx", "xls"],
+            help="Optional — upload your bank statement or trading report (PDF, TXT, CSV, Excel)",
+            accept_multiple_files=True
         )
 
-        if uploaded_file is not None:
-            if uploaded_file.name != st.session_state.indexed_filename:
-                with st.spinner("📥 Indexing document..."):
+        if uploaded_files:
+            # Get names of newly uploaded files
+            uploaded_names = [f.name for f in uploaded_files]
+
+            # Check if files changed since last index
+            if uploaded_names != st.session_state.get("indexed_filenames", []):
+                with st.spinner(f"📥 Indexing {len(uploaded_files)} file(s)..."):
                     try:
-                        with tempfile.NamedTemporaryFile(
-                            delete=False,
-                            suffix=os.path.splitext(uploaded_file.name)[1]
-                        ) as tmp_file:
+                        all_chunks = []
+
+                        for uploaded_file in uploaded_files:
+                            # Save each file temporarily
+                            tmp_file = tempfile.NamedTemporaryFile(
+                                delete=False,
+                                suffix=os.path.splitext(uploaded_file.name)[1]
+                            )
                             tmp_file.write(uploaded_file.getvalue())
                             tmp_file_path = tmp_file.name
+                            tmp_file.close()  # ← Close explicitly before processing!
 
-                        st.session_state.vector_store = index_documents(
-                            tmp_file_path
+                            # Load and process each file
+                            from document_loader import load_document, preprocess_document
+                            from text_chunker import create_chunks
+
+                            try:
+                                documents    = load_document(tmp_file_path)
+                                cleaned_docs = preprocess_document(documents)
+                                chunks       = create_chunks(cleaned_docs)
+                                all_chunks.extend(chunks)
+                                print(f"✅ Processed: {uploaded_file.name} ({len(chunks)} chunks)")
+                            finally:
+                                # Always delete temp file even if error occurs
+                                try:
+                                    os.unlink(tmp_file_path)
+                                except:
+                                    pass  # Ignore if already deleted
+                            print(f"✅ Processed: {uploaded_file.name} ({len(chunks)} chunks)")
+
+                        # Store ALL chunks in one vector store
+                        from vector_store import create_vector_store
+                        embedding_model = st.session_state.embedding_model
+                        st.session_state.vector_store = create_vector_store(
+                            all_chunks,
+                            embedding_model
                         )
-                        st.session_state.document_indexed = True
-                        st.session_state.indexed_filename = uploaded_file.name
 
-                        os.unlink(tmp_file_path)
+                        st.session_state.document_indexed  = True
+                        st.session_state.indexed_filenames = uploaded_names
+                        st.session_state.indexed_filename  = ", ".join(uploaded_names)
 
-                        # Add document loaded notification to chat
+                        # Add success message to chat
+                        file_list = "\n".join([f"  - {n}" for n in uploaded_names])
                         st.session_state.messages.append({
                             "role"    : "assistant",
-                            "content" : f"✅ **{uploaded_file.name}** has been indexed! You can now ask questions about your personal finances alongside general finance questions.",
+                            "content" : f"✅ **{len(uploaded_files)} file(s) indexed successfully!**\n\n{file_list}\n\nYou can now ask questions across all your documents!",
                             "sources" : [],
                             "chunks"  : [],
                             "mode"    : "general"
@@ -299,19 +338,19 @@ def render_sidebar():
 
                     except Exception as e:
                         st.error(f"❌ Error: {str(e)}")
-
         # ── Status ────────────────────────────────────────────────────
         st.divider()
         st.subheader("📊 Status")
 
         if st.session_state.document_indexed:
-            st.success("✅ Document loaded")
-            st.info(f"📄 {st.session_state.indexed_filename}")
+            st.success(f"✅ {len(st.session_state.indexed_filenames)} file(s) loaded")
+            for fname in st.session_state.indexed_filenames:
+                st.info(f"📄 {fname}")
         else:
             st.info("💬 General finance mode")
             st.caption("No document uploaded — answering from general knowledge")
 
-        # ── Settings ──────────────────────────────────────────────────
+                # ── Settings ──────────────────────────────────────────────────
         st.divider()
         st.subheader("⚙️ Settings")
 
