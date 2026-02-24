@@ -3,7 +3,6 @@ import sys
 import os
 import tempfile
 
-# Add src to path so we can import our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from rag_pipeline import (
@@ -12,8 +11,10 @@ from rag_pipeline import (
     index_documents,
     load_vector_store,
     rag_query,
+    extract_text_from_response,
     CHROMA_DB_PATH
 )
+from langchain_core.messages import HumanMessage, SystemMessage
 
 # ── Page configuration ────────────────────────────────────────────────
 st.set_page_config(
@@ -22,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ── Custom CSS for better appearance ─────────────────────────────────
+# ── Custom CSS ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .source-box {
@@ -43,6 +44,22 @@ st.markdown("""
         font-size: 0.80em;
         color: #666;
     }
+    .mode-badge-rag {
+        background-color: #e8f5e9;
+        border: 1px solid #4CAF50;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.75em;
+        color: #2e7d32;
+    }
+    .mode-badge-general {
+        background-color: #e3f2fd;
+        border: 1px solid #2196F3;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.75em;
+        color: #1565c0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,10 +68,24 @@ st.markdown("""
 def init_session_state():
     """
     Initialize all session state variables.
-    Called once when app starts.
     """
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        # Start with welcome message
+        st.session_state.messages = [
+            {
+                "role"    : "assistant",
+                "content" : """👋 **Welcome to your Personal Finance Assistant!**
+
+I can help you with:
+- 💬 **General finance questions** — EPF, SIP, NPS, tax planning and more
+- 📄 **Your personal finances** — Upload your bank statement to ask about your spending, investments and balance
+
+Feel free to ask any finance question — no document upload required!""",
+                "sources" : [],
+                "chunks"  : [],
+                "mode"    : "general"
+            }
+        ]
 
     if "vector_store" not in st.session_state:
         st.session_state.vector_store = None
@@ -74,32 +105,174 @@ def init_session_state():
     if "show_chunks" not in st.session_state:
         st.session_state.show_chunks = False
 
+    # ── NEW: Chat history for memory ──────────────────────────────────
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+
+# ── General finance chat with memory ─────────────────────────────────
+def general_finance_chat(question, chat_history, llm):
+    """
+    Answer general finance questions using Gemini
+    with full conversation memory.
+
+    Args:
+        question    : Current user question
+        chat_history: List of previous (question, answer) tuples
+        llm         : Gemini LLM instance
+
+    Returns:
+        Answer string
+    """
+    # Build conversation history for context
+    history_text = ""
+    if chat_history:
+        history_text = "\n\nPrevious conversation:\n"
+        for prev_q, prev_a in chat_history[-5:]:  # last 5 turns
+            history_text += f"User: {prev_q}\nAssistant: {prev_a}\n\n"
+
+    system_message = SystemMessage(content="""
+    You are a helpful personal finance assistant for Indian users.
+    You have deep knowledge of Indian finance topics including:
+    EPF, PPF, NPS, SIP, mutual funds, tax planning, ELSS,
+    fixed deposits, insurance, stock market, and budgeting.
+
+    Rules:
+    1. Answer clearly and practically for Indian context
+    2. Use ₹ for currency formatting
+    3. Reference previous conversation context when relevant
+    4. If asked to elaborate or explain more — refer to
+       your previous answer in this conversation
+    5. Be concise but complete
+    """)
+
+    human_message = HumanMessage(content=f"""
+    {history_text}
+    Current question: {question}
+    """)
+
+    try:
+        response = llm.invoke([system_message, human_message])
+        return extract_text_from_response(response)
+    except Exception as e:
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            return "⚠️ API rate limit reached. Please wait a few minutes and try again."
+        raise e
+
+
+# ── RAG chat with memory ──────────────────────────────────────────────
+def rag_finance_chat(question, chat_history, vector_store, llm):
+    """
+    Answer questions using RAG pipeline with conversation memory.
+
+    Args:
+        question    : Current user question
+        chat_history: List of previous (question, answer) tuples
+        vector_store: FAISS vector store instance
+        llm         : Gemini LLM instance
+
+    Returns:
+        Dictionary with answer, sources, chunks
+    """
+    from vector_store import search_vector_store
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+    # Build conversation history
+    history_text = ""
+    if chat_history:
+        history_text = "\n\nPrevious conversation:\n"
+        for prev_q, prev_a in chat_history[-5:]:
+            history_text += f"User: {prev_q}\nAssistant: {prev_a}\n\n"
+
+    # Search for relevant chunks
+    relevant_chunks = search_vector_store(
+        vector_store,
+        question,
+        top_k=3
+    )
+
+    # Build context from chunks
+    context_parts = []
+    for i, (doc, score) in enumerate(relevant_chunks):
+        context_parts.append(f"[Context {i+1}]\n{doc.page_content}")
+    context_text = "\n\n".join(context_parts)
+
+    system_message = SystemMessage(content="""
+    You are a helpful personal finance assistant for Indian users.
+    You have two sources of knowledge:
+    1. User's personal financial documents (provided as context)
+    2. General Indian finance knowledge from training
+
+    Rules:
+    1. If question is about USER'S PERSONAL finances
+       → Answer from document context
+       → If not found say "I couldn't find that in your document"
+
+    2. If question is GENERAL finance
+       → Answer from general knowledge
+       → Prefix with "Based on general finance knowledge:"
+
+    3. Use previous conversation context for follow-up questions
+       If user says "elaborate", "explain more", "tell me more"
+       → Refer to your previous answer and expand on it
+
+    4. Show calculation working when doing math
+
+    5. Format currency as ₹ with Indian number format
+    """)
+
+    human_message = HumanMessage(content=f"""
+    {history_text}
+    Relevant sections from financial documents:
+    {context_text}
+
+    Current question: {question}
+    """)
+
+    try:
+        response = llm.invoke([system_message, human_message])
+        answer   = extract_text_from_response(response)
+        sources  = list(set([
+            doc.metadata.get('source', 'unknown')
+            for doc, score in relevant_chunks
+        ]))
+        return {
+            "answer"  : answer,
+            "sources" : sources,
+            "chunks"  : relevant_chunks
+        }
+    except Exception as e:
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            return {
+                "answer"  : "⚠️ API rate limit reached. Please wait a few minutes and try again.",
+                "sources" : [],
+                "chunks"  : []
+            }
+        raise e
 
 # ── Sidebar ───────────────────────────────────────────────────────────
 def render_sidebar():
     """
-    Render the sidebar with document upload and settings.
+    Render sidebar with optional document upload.
     """
     with st.sidebar:
         st.title("📁 Document Manager")
         st.divider()
 
-        # Document upload section
-        st.subheader("Upload Financial Document")
-        st.caption("Supported: PDF, TXT files")
+        # ── Document upload — OPTIONAL ────────────────────────────────
+        st.subheader("📄 Upload Document (Optional)")
+        st.caption("Upload your bank statement for personal finance queries")
 
         uploaded_file = st.file_uploader(
             label="Choose a file",
             type=["pdf", "txt"],
-            help="Upload your bank statement or financial document"
+            help="Optional — upload to ask about your personal finances"
         )
 
-        # Process uploaded file
         if uploaded_file is not None:
             if uploaded_file.name != st.session_state.indexed_filename:
                 with st.spinner("📥 Indexing document..."):
                     try:
-                        # Save uploaded file temporarily
                         with tempfile.NamedTemporaryFile(
                             delete=False,
                             suffix=os.path.splitext(uploaded_file.name)[1]
@@ -107,49 +280,55 @@ def render_sidebar():
                             tmp_file.write(uploaded_file.getvalue())
                             tmp_file_path = tmp_file.name
 
-                        # Index the document
                         st.session_state.vector_store = index_documents(
                             tmp_file_path
                         )
                         st.session_state.document_indexed = True
                         st.session_state.indexed_filename = uploaded_file.name
 
-                        # Clean up temp file
                         os.unlink(tmp_file_path)
 
-                        # Add welcome message to chat
-                        st.session_state.messages = []
+                        # Add document loaded notification to chat
                         st.session_state.messages.append({
                             "role"    : "assistant",
-                            "content" : f"✅ Successfully indexed **{uploaded_file.name}**! I'm ready to answer questions about your finances. What would you like to know?",
+                            "content" : f"✅ **{uploaded_file.name}** has been indexed! You can now ask questions about your personal finances alongside general finance questions.",
                             "sources" : [],
-                            "chunks"  : []
+                            "chunks"  : [],
+                            "mode"    : "general"
                         })
 
                     except Exception as e:
-                        st.error(f"❌ Error indexing document: {str(e)}")
+                        st.error(f"❌ Error: {str(e)}")
 
-        # Show document status
+        # ── Status ────────────────────────────────────────────────────
         st.divider()
         st.subheader("📊 Status")
 
         if st.session_state.document_indexed:
-            st.success(f"✅ Document loaded")
+            st.success("✅ Document loaded")
             st.info(f"📄 {st.session_state.indexed_filename}")
         else:
-            st.warning("⚠️ No document loaded")
-            st.caption("Upload a document to start chatting")
+            st.info("💬 General finance mode")
+            st.caption("No document uploaded — answering from general knowledge")
 
-        # Settings
+        # ── Settings ──────────────────────────────────────────────────
         st.divider()
         st.subheader("⚙️ Settings")
+
         st.session_state.show_chunks = st.toggle(
             "Show retrieved chunks",
             value=False,
-            help="Show which parts of document were used to answer"
+            help="Show document sections used to answer"
         )
 
-        # About section
+        # ── Clear chat ────────────────────────────────────────────────
+        st.divider()
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.messages = []
+            st.session_state.chat_history = []
+            st.rerun()
+
+        # ── About ─────────────────────────────────────────────────────
         st.divider()
         st.subheader("ℹ️ About")
         st.caption("""
@@ -158,8 +337,7 @@ def render_sidebar():
 
         Built with:
         - Google Gemini AI
-        - LangChain
-        - ChromaDB
+        - LangChain + FAISS
         - Streamlit
         """)
 
@@ -167,35 +345,31 @@ def render_sidebar():
 # ── Main chat area ────────────────────────────────────────────────────
 def render_chat():
     """
-    Render the main chat interface.
+    Render main chat interface.
+    Works with or without uploaded document.
     """
     st.title("💰 Personal Finance Assistant")
-    st.caption("Upload your bank statement and ask questions about your finances!")
+    st.caption("Ask any finance question — upload your bank statement for personal insights!")
 
-    # Show welcome message if no document loaded
-    if not st.session_state.document_indexed:
-        st.info("""
-        👋 **Welcome to your Personal Finance Assistant!**
-
-        To get started:
-        1. Upload your bank statement (PDF or TXT) in the sidebar
-        2. Wait for indexing to complete
-        3. Start asking questions about your finances!
-
-        **Example questions you can ask:**
-        - How much did I spend on food this month?
-        - What are my total SIP investments?
-        - What is my closing balance?
-        - When was my salary credited?
-        """)
-        return
-
-    # Display chat history
+    # ── Display chat history ──────────────────────────────────────────
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-            # Show sources if available
+            # Show mode badge
+            if message["role"] == "assistant" and message.get("mode"):
+                if message["mode"] == "rag":
+                    st.markdown(
+                        '<span class="mode-badge-rag">📄 From your document</span>',
+                        unsafe_allow_html=True
+                    )
+                elif message["mode"] == "general":
+                    st.markdown(
+                        '<span class="mode-badge-general">💡 General knowledge</span>',
+                        unsafe_allow_html=True
+                    )
+
+            # Show sources
             if message.get("sources"):
                 sources_text = ", ".join([
                     os.path.basename(s)
@@ -206,7 +380,7 @@ def render_chat():
                     unsafe_allow_html=True
                 )
 
-            # Show chunks if toggle is on
+            # Show chunks if toggle on
             if st.session_state.show_chunks and message.get("chunks"):
                 with st.expander("🔍 View retrieved chunks"):
                     for i, (doc, score) in enumerate(message["chunks"]):
@@ -219,8 +393,8 @@ def render_chat():
                             unsafe_allow_html=True
                         )
 
-    # Chat input
-    if prompt := st.chat_input("Ask a question about your finances..."):
+    # ── Chat input ────────────────────────────────────────────────────
+    if prompt := st.chat_input("Ask a finance question..."):
 
         # Display user message
         with st.chat_message("user"):
@@ -231,52 +405,90 @@ def render_chat():
             "role"    : "user",
             "content" : prompt,
             "sources" : [],
-            "chunks"  : []
+            "chunks"  : [],
+            "mode"    : ""
         })
 
-        # Get RAG response
+        # ── Decide which mode to use ──────────────────────────────────
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Searching your documents..."):
-                result = rag_query(
-                    prompt,
-                    st.session_state.vector_store,
-                    st.session_state.llm
+
+            if st.session_state.document_indexed:
+                # RAG mode — document uploaded
+                with st.spinner("🔍 Searching your documents..."):
+                    result = rag_finance_chat(
+                        prompt,
+                        st.session_state.chat_history,
+                        st.session_state.vector_store,
+                        st.session_state.llm
+                    )
+
+                st.markdown(result["answer"])
+                mode = "rag"
+
+                if result["sources"]:
+                    sources_text = ", ".join([
+                        os.path.basename(s)
+                        for s in result["sources"]
+                    ])
+                    st.markdown(
+                        f'<div class="source-box">📄 Source: {sources_text}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                if st.session_state.show_chunks and result["chunks"]:
+                    with st.expander("🔍 View retrieved chunks"):
+                        for i, (doc, score) in enumerate(result["chunks"]):
+                            st.markdown(
+                                f'<div class="chunk-box">'
+                                f'<b>Chunk {i+1}</b> '
+                                f'(score: {round(score, 4)})<br>'
+                                f'{doc.page_content[:200]}...'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+
+                # Save to session
+                st.session_state.messages.append({
+                    "role"    : "assistant",
+                    "content" : result["answer"],
+                    "sources" : result["sources"],
+                    "chunks"  : result["chunks"],
+                    "mode"    : mode
+                })
+
+                # Update chat history for memory
+                st.session_state.chat_history.append(
+                    (prompt, result["answer"])
                 )
 
-            # Display answer
-            st.markdown(result["answer"])
+            else:
+                # General mode — no document uploaded
+                with st.spinner("💭 Thinking..."):
+                    answer = general_finance_chat(
+                        prompt,
+                        st.session_state.chat_history,
+                        st.session_state.llm
+                    )
 
-            # Display sources
-            if result["sources"]:
-                sources_text = ", ".join([
-                    os.path.basename(s)
-                    for s in result["sources"]
-                ])
+                st.markdown(answer)
                 st.markdown(
-                    f'<div class="source-box">📄 Source: {sources_text}</div>',
+                    '<span class="mode-badge-general">💡 General knowledge</span>',
                     unsafe_allow_html=True
                 )
 
-            # Display chunks if toggle is on
-            if st.session_state.show_chunks and result["chunks"]:
-                with st.expander("🔍 View retrieved chunks"):
-                    for i, (doc, score) in enumerate(result["chunks"]):
-                        st.markdown(
-                            f'<div class="chunk-box">'
-                            f'<b>Chunk {i+1}</b> '
-                            f'(score: {round(score, 4)})<br>'
-                            f'{doc.page_content[:200]}...'
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
+                # Save to session
+                st.session_state.messages.append({
+                    "role"    : "assistant",
+                    "content" : answer,
+                    "sources" : [],
+                    "chunks"  : [],
+                    "mode"    : "general"
+                })
 
-        # Save assistant message
-        st.session_state.messages.append({
-            "role"    : "assistant",
-            "content" : result["answer"],
-            "sources" : result["sources"],
-            "chunks"  : result["chunks"]
-        })
+                # Update chat history for memory
+                st.session_state.chat_history.append(
+                    (prompt, answer)
+                )
 
 
 # ── Main app ──────────────────────────────────────────────────────────

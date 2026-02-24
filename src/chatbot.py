@@ -13,7 +13,7 @@ genai.configure(api_key=api_key)
 
 # ── Model setup ─────────────────────────────────────────────────────
 model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash-lite",
+    model_name="gemini-3-flash-preview",
     system_instruction="""
     You are a helpful personal finance assistant for Indian users.
     You help with topics like budgeting, savings, investments, 

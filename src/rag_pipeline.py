@@ -17,13 +17,37 @@ load_dotenv()
 CHROMA_DB_PATH = "chroma_db"
 TOP_K_CHUNKS   = 3
 
+# ── Helper: Extract clean text from LLM response ──────────────────────
+def extract_text_from_response(response):
+    """
+    Extract clean text from LLM response.
+    Handles both string and list response formats
+    since different Gemini models return different formats.
+
+    gemini-2.5-flash-lite → response.content = "string"
+    gemini-3-flash-preview → response.content = [{'type': 'text', 'text': '...'}]
+
+    Args:
+        response: LLM response object
+
+    Returns:
+        Clean text string
+    """
+    if isinstance(response.content, list):
+        return " ".join([
+            block.get("text", "")
+            for block in response.content
+            if isinstance(block, dict)
+        ])
+    return response.content
+
 # ── Step 1: Initialize LLM ────────────────────────────────────────────
 def get_llm():
     """
     Initialize and return Gemini LLM.
     """
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
+        model="gemini-3-flash-preview",
         google_api_key=os.getenv("GEMINI_API_KEY"),
         temperature=0.2
     )
@@ -157,9 +181,19 @@ def rag_query(question, vector_store, llm):
 
     # Step 3: Get answer from Gemini
     print("🤔 Generating answer...")
-    response = llm.invoke(messages)
+    try:
+        response = llm.invoke(messages)
+        answer   = extract_text_from_response(response)
+    except Exception as e:
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            return {
+                "question" : question,
+                "answer"   : "⚠️ API rate limit reached. Please wait a few minutes and try again.",
+                "sources"  : [],
+                "chunks"   : []
+            }
+        raise e
 
-    # Step 4: Extract sources
     sources = list(set([
         doc.metadata.get('source', 'unknown')
         for doc, score in relevant_chunks
@@ -167,7 +201,7 @@ def rag_query(question, vector_store, llm):
 
     return {
         "question" : question,
-        "answer"   : response.content,
+        "answer"   : answer,
         "sources"  : sources,
         "chunks"   : relevant_chunks
     }
